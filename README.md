@@ -1,6 +1,6 @@
 ## Inspiration
 
-We ofter want just to use a specitic module or function of a package, and for that we have to pull entire packages, with their full dependencies. We can end up with a several hundred MB environment, often too big for a regular AWS lambda layer, or conflicting packages. It is often the case that developers end up going on github, to analyze the packages and try to extract only the interesting files, which can be quite complicated at the end.
+We often just need a specific module or function from a package, yet we have to install the entire thing — along with all its dependencies. This can easily lead to environments that weigh hundreds of megabytes, too large for a typical AWS Lambda layer or prone to package conflicts. Developers sometimes end up digging through GitHub to manually extract only the parts they need, which can quickly turn into a messy and time-consuming process. **LayerLite** is here to automate package analysis and trimming.
 
 ## What it does
 
