@@ -13,12 +13,18 @@ We often just need a specific module or function from a python package, yet we h
 You can deploy the LayerLite app both locally and in an ECR repository using using CLI:
 
 ### 1. Locally
-1. Deploy server locally using
+
+1. Install requirements
+```bash
+pip install requirements.txt
+```
+
+2. Deploy server locally using
 ```bash
 python layerlite.py
 ```
 
-2. You can use jq to pass your python file to the agent.
+3. You can use jq to pass your python file to the agent.
 ```bash
 jq -Rs '{prompt: .}' user_file.py \
 | curl -X POST http://localhost:8080/invocations \
@@ -35,6 +41,11 @@ agentcore configure -e layerlite.py
 ```bash
 agentcore invoke "$(jq -Rs '{prompt: .}' user_file.py)"
 ```
+
+By default, the app uploads the generated `.zip` file to the `layerlite-output` S3 bucket.
+You can change the destination by setting the `LAYERLITE_BUCKET` environment variable.
+When running locally, the output can also be found in the `layerlite_env/sandbox-env` directory.
+
 
 ## How we built it
 
