@@ -17,6 +17,7 @@ from src.create_venv import create_uv_venv, measure_venv_size
 from src.analyze_recursive_imports import Tree, recursive_analysis, extract_used_files, virtual_remove_unused_files, compute_virtual_gained_size
 from src.comment_removed_imports_inits import clean_init_files
 from src.agent_cleanup_package import agent_cleanup
+from strands.models import BedrockModel
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -183,6 +184,11 @@ def save_env_to_bucket():
         logger.error(error_msg)
         return {"error": error_msg}
 
+model = BedrockModel(
+    model_id=os.getenv("MODEL_ID", "us.anthropic.claude-sonnet-4-5-20250929-v1:0"),
+    region_name=os.getenv("AWS_REGION", "us-west-2")
+)
+
 agent = Agent(
     tools=[
         save_user_file,
@@ -207,16 +213,24 @@ If it worked correctly, indicate to the user which packages you suggest to optim
 Once the user has validated the packages to trim, use `run_main_pipeline` and describe the user the gain that have been made. Ask user if you can continue the cleaning.
 The cleaning has probably broke things. Use `clean_packages_agent` to try to obtain functionnal librairies.
 Finally, once all cleaning is done and the environment is working, use `save_env_to_bucket` to save the optimized environment to an S3 bucket for future use.
-    """
+    """,
+    model=model,
 )
 
 @app.entrypoint
 def main(payload):
     """Main entrypoint - handles user messages."""
-    user_message = payload.get("prompt", "Run the pipeline on the user file.")
-    return {"message": agent(user_message).message}
+    user_message = payload.get("prompt", "Run the pipeline on the user file.")    
+    if not user_message or not user_message.strip():
+        user_message = "Hello! I'm LayerLite, ready to help you optimize your Python packages. Please provide a Python script that you'd like to optimize."
+    
+    try:
+        response = agent(user_message)
+        return {"message": response.message}
+    except Exception as e:
+        logger.error(f"Error processing user message: {str(e)}")
+        return {"message": "I encountered an error processing your request. Please try again or provide a valid Python script to optimize."}
 
 if __name__ == "__main__":
-    # app.run()
-    create_uv_venv('user_input/requirements_user_file.txt', 'env-strands')
-    
+    app.run()
+    # create_uv_venv('user_input/requirements_user_file.txt', 'env-strands')

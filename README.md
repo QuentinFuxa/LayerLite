@@ -8,6 +8,34 @@ We often just need a specific module or function from a python package, yet we h
 
  LayerLite takes a user's Python entry point and produces a minimal, production-ready environment capable of executing that file. The main agent provisions an isolated sandbox, installs just the inferred requirements, and executes the script to capture output. A static analyzer then maps the static recursive import graph, tagging every file that is actually used, including compiled extensions and data files. Unused files are stripped, `__init__` modules are patched so they continue to resolve, and the result is a slim package. The environment resulting from that aggressive pruning is likely not fully functional. A specialized agent takes over, executes the user file in the pruned environment, analyzes errors, explores the package structure, restores or modifies files, produces dependency subtrees, and iterates until the user file is executable.
 
+# How to use
+
+You can deploy the LayerLite app both locally and in an ECR repository using using CLI:
+
+### 1. Locally
+1. Deploy server locally using
+```bash
+python layerlite.py
+```
+
+2. You can use jq to pass your python file to the agent.
+```bash
+jq -Rs '{prompt: .}' user_file.py \
+| curl -X POST http://localhost:8080/invocations \
+  -H 'Content-Type: application/json' \
+  --data-binary @-
+```
+
+### 2. On AWS
+1. Deploy the server using
+```bash
+agentcore configure -e layerlite.py
+```
+2. You can use jq to pass your python file to the agent.
+```bash
+agentcore invoke "$(jq -Rs '{prompt: .}' user_file.py)"
+```
+
 ## How we built it
 
 We orchestrate the workflow with Bedrock AgentCore and Strands. The main agent handles requirement discovery, environment creation, and user interactions. The core optimization loop leverages Jedi and custom AST passes.
