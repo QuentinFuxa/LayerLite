@@ -114,7 +114,7 @@ def clean_init_files(lib, path_python_exec):
     return analysis_and_correction_output
 
 if __name__ == '__main__':
-    path_env = 'layerlite_env/env-strands/'
+    path_env = 'layerlite_env/sandbox-env/'
     path_python_exec = path_env + 'bin/python3'
     path_libs = path_env + 'lib/python3.13/site-packages/'
 

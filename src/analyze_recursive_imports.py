@@ -354,7 +354,7 @@ if __name__ == '__main__':
 
     libs_to_analyze = ['scipy', 'pvlib']
     initial_path = "user_input/user_file.py"
-    path_env = 'layerlite_env/env-strands/'
+    path_env = 'layerlite_env/sandbox-env/'
     path_python_exec = path_env + 'bin/python3'
     path_libs = path_env + 'lib/python3.13/site-packages/'
     
