@@ -260,7 +260,7 @@ def extract_imports(tree):
 def recursive_analysis(tree, libs_to_analyze):
     if tree.path.endswith('__init__.py'):
         return tree
-    print(tree.depth, tree.name)
+    print(tree.depth, tree.name if tree.name else tree.path)
     tree = extract_imports(tree)
     for children_tree in tree.children:
         if children_tree.should_analyze(libs_to_analyze=libs_to_analyze):

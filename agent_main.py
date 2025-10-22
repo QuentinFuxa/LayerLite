@@ -46,6 +46,7 @@ def create_venv_from_requirements(list_of_requirements:list):
     with open('user_input/requirements_user_file.txt', 'w') as f:
         f.write(requirements)
     create_uv_venv('user_input/requirements_user_file.txt', 'env-strands')
+    create_uv_venv('user_input/requirements_user_file.txt', 'env-strands-backup')
     return measure_venv_size('layerlite_env/env-strands')
 
 @tool
@@ -216,6 +217,6 @@ def main(payload):
     return {"message": agent(user_message).message}
 
 if __name__ == "__main__":
-    app.run()
-    # create_venv_from_requirements(['pvlib'])
+    # app.run()
+    create_uv_venv('user_input/requirements_user_file.txt', 'env-strands')
     
