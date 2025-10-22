@@ -6,12 +6,17 @@ import shutil
 import subprocess
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 from typing import Optional
 
 import jedi
 from strands import Agent, tool
 from strands.models import BedrockModel
+
+try:
+    from .analyze_recursive_imports import Tree, extract_imports
+except ImportError:
+    from analyze_recursive_imports import Tree, extract_imports
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -19,7 +24,9 @@ logger = logging.getLogger(__name__)
 INITIAL_OUTPUT_RESULT = Path("generated_files/initial_output.json")
 MODIFICATIONS_LOG_PATH = Path("generated_files/llm_modifications_log.json")
 USER_FILE = "user_input/user_file.py"
-LIB_ROOT_PATH = Path("layerlite_env/env-strands/lib/python3.13/site-packages")
+LIB_ROOT_PATH = Path("layerlite_env/sandbox-env/lib/python3.13/site-packages")
+BACKUP_LIB_ROOT_PATH = Path("layerlite_env/sandbox-env-backup/lib/python3.13/site-packages")
+BACKUP_PYTHON_EXEC = "layerlite_env/sandbox-env-backup/bin/python3"
 
 def initialize_modification_log():
     if not MODIFICATIONS_LOG_PATH.exists():
@@ -63,6 +70,84 @@ def to_lib_relative_path(path: Path) -> str:
             return str(resolved_path.relative_to(resolved_lib_root))
         except ValueError:
             return str(path)
+
+def analyze_file_dependencies(file_relative_path: str) -> List[str]:
+    """Analyze dependencies of a file using jedi in the backup environment"""
+    try:
+        backup_file_path = BACKUP_LIB_ROOT_PATH / file_relative_path
+        
+        if not backup_file_path.exists():
+            logger.warning(f"Backup file not found: {backup_file_path}")
+            return []
+            
+        if not backup_file_path.suffix == '.py':
+            logger.info(f"Skipping non-Python file: {backup_file_path}")
+            return []
+            
+        tree = Tree(path=str(backup_file_path))
+        tree.set_root(environment_path=BACKUP_PYTHON_EXEC)
+        
+        tree = extract_imports(tree)
+        all_paths, probable_paths = tree.get_all_paths()
+        all_dependency_paths = all_paths + probable_paths
+        
+        relative_dependencies = []
+        for dep_path in all_dependency_paths:
+            if 'site-packages' in dep_path:
+                parts = dep_path.split('site-packages/')
+                if len(parts) > 1:
+                    relative_dependencies.append(parts[1])
+                    
+        log_tool(
+            operation="Analyze Dependencies", 
+            file_path=Path(file_relative_path),
+            details={
+                'dependencies_found': len(relative_dependencies),
+                'dependencies': relative_dependencies[:10]
+            }
+        )
+        return relative_dependencies
+        
+    except Exception as e:
+        logger.error(f"Error analyzing dependencies for {file_relative_path}: {e}")
+        log_tool(
+            operation="Analyze Dependencies Error",
+            file_path=Path(file_relative_path),
+            details={'error': str(e)}
+        )
+        return []
+
+def auto_undelete_dependencies(dependencies: List[str]) -> List[str]:
+    """Automatically undelete dependency files that have __DELETED_ prefix"""
+    auto_restored = []
+    
+    for dep_relative_path in dependencies:
+        try:
+            dep_path = LIB_ROOT_PATH / dep_relative_path
+            dep_dir = dep_path.parent
+            dep_filename = dep_path.name
+            deleted_path = dep_dir / f"__DELETED_{dep_filename}"
+            
+            if deleted_path.exists() and not dep_path.exists():
+                dep_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(deleted_path), str(dep_path))
+                
+                auto_restored.append(dep_relative_path)
+                log_tool(
+                    operation="Auto Undelete Dependency",
+                    file_path=Path(dep_relative_path),
+                    details={'restored_from': f"__DELETED_{dep_filename}"}
+                )
+                
+        except Exception as e:
+            logger.error(f"Error auto-undeleting {dep_relative_path}: {e}")
+            log_tool(
+                operation="Auto Undelete Error",
+                file_path=Path(dep_relative_path),
+                details={'error': str(e)}
+            )
+            
+    return auto_restored
 
 @tool
 def read_file(relative_path: str) -> str:
@@ -246,10 +331,43 @@ def move_lib_item(source_relative_path: str, destination_relative_path: str) -> 
     if error_message:
         log_tool(operation="Move item Error", file_path=to_lib_relative_path(source_path), details={'destination': to_lib_relative_path(destination_path), 'error': error_message})
         return f"Error: {error_message}"
+    
+    is_undelete = source_relative_path.startswith("__DELETED_") or ("__DELETED_" in source_relative_path)
+    is_python_file = destination_relative_path.endswith('.py')
+    
     destination_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(source_path), str(destination_path))
 
     log_tool("Move item", file_path=to_lib_relative_path(source_path), details={'destination': to_lib_relative_path(destination_path)})
+    
+    if is_undelete and is_python_file:
+        try:
+            dependencies = analyze_file_dependencies(destination_relative_path)
+            if dependencies:
+                auto_restored = auto_undelete_dependencies(dependencies)
+                if auto_restored:
+                    auto_restore_msg = f"Auto-restored {len(auto_restored)} dependencies: {', '.join(auto_restored[:5])}"
+                    if len(auto_restored) > 5:
+                        auto_restore_msg += f" and {len(auto_restored) - 5} more"
+                    
+                    log_tool(
+                        operation="Auto Dependency Restore Complete",
+                        file_path=Path(destination_relative_path),
+                        details={
+                            'trigger_file': destination_relative_path,
+                            'dependencies_analyzed': len(dependencies),
+                            'files_auto_restored': len(auto_restored),
+                            'restored_files': auto_restored
+                        }
+                    )
+                    return f"Moved '{source_relative_path}' to '{destination_relative_path}'. {auto_restore_msg}"
+        except Exception as e:
+            logger.error(f"Error during auto-dependency restoration: {e}")
+            log_tool(
+                operation="Auto Dependency Restore Error",
+                file_path=Path(destination_relative_path),
+                details={'error': str(e)}
+            )
     return f"Moved '{source_relative_path}' to '{destination_relative_path}'"
 
 @tool
@@ -258,7 +376,7 @@ def execute_user_file():
     Use that to test if user file still works
     """
     result = subprocess.run(
-        ["layerlite_env/env-strands/bin/python", USER_FILE],
+        ["layerlite_env/sandbox-env/bin/python", USER_FILE],
         capture_output=True,
         text=True
     )
@@ -277,15 +395,112 @@ def read_user_file() -> str:
     return user_file_path.read_text()
 
 @tool
+def save_env_and_remove_deleted_files() -> str:
+    """Save current environment under layerlite_env/sandbox-env-with-deleted and remove all __DELETED_ files"""    
+    source_env_path = Path("layerlite_env/sandbox-env")
+    backup_env_path = Path("layerlite_env/sandbox-env-with-deleted")
+    
+    try:
+        if backup_env_path.exists():
+            shutil.rmtree(backup_env_path)
+            
+        shutil.copytree(source_env_path, backup_env_path)
+        
+        log_tool(
+            operation="Save Environment",
+            details={
+                'source': str(source_env_path),
+                'destination': str(backup_env_path),
+                'status': 'success'
+            }
+        )
+        
+        deleted_files_removed = []
+        deleted_dirs_removed = []
+        
+        for root, dirs, files in os.walk(LIB_ROOT_PATH, topdown=False):
+            root_path = Path(root)
+            
+            for filename in files:
+                if filename.startswith("__DELETED_"):
+                    file_path = root_path / filename
+                    try:
+                        file_path.unlink()
+                        relative_path = to_lib_relative_path(file_path)
+                        deleted_files_removed.append(relative_path)
+                    except Exception as e:
+                        logger.error(f"Error removing file {file_path}: {e}")
+            
+            for dirname in dirs[:]:
+                if dirname.startswith("__DELETED_"):
+                    dir_path = root_path / dirname
+                    try:
+                        shutil.rmtree(dir_path)
+                        relative_path = to_lib_relative_path(dir_path)
+                        deleted_dirs_removed.append(relative_path)
+                        dirs.remove(dirname)
+                    except Exception as e:
+                        logger.error(f"Error removing directory {dir_path}: {e}")
+        
+        log_tool(
+            operation="Remove Deleted Files",
+            details={
+                'files_removed': len(deleted_files_removed),
+                'directories_removed': len(deleted_dirs_removed),
+                'files_preview': deleted_files_removed[:10],
+                'directories_preview': deleted_dirs_removed[:10]
+            }
+        )
+        
+        result_msg = f"Environment saved to {backup_env_path}. "
+        result_msg += f"Removed {len(deleted_files_removed)} __DELETED_ files "
+        result_msg += f"and {len(deleted_dirs_removed)} __DELETED_ directories from site-packages."
+        
+        if deleted_files_removed or deleted_dirs_removed:
+            result_msg += f"\nFiles removed: {deleted_files_removed[:5]}"
+            if len(deleted_files_removed) > 5:
+                result_msg += f" and {len(deleted_files_removed) - 5} more"
+            if deleted_dirs_removed:
+                result_msg += f"\nDirectories removed: {deleted_dirs_removed[:5]}"
+                if len(deleted_dirs_removed) > 5:
+                    result_msg += f" and {len(deleted_dirs_removed) - 5} more"
+        
+        return result_msg
+        
+    except Exception as e:
+        error_msg = f"Error during save and cleanup operation: {e}"
+        log_tool(
+            operation="Save Environment and Remove Deleted Error",
+            details={'error': str(e)}
+        )
+        return error_msg
+
+@tool
 def execute_initial_user_file():
     with open(INITIAL_OUTPUT_RESULT) as f:
         content = f.read()
     return content
 
-# model = BedrockModel(
-#     model_id=os.getenv("MODEL_ID", "us.anthropic.claude-sonnet-4-5-20250929-v1:0"),
-#     region_name=os.getenv("AWS_REGION", "us-west-2")
-# )
+model = BedrockModel(
+    model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    region_name="us-west-2"
+)
+
+
+try:
+    from strands.models.anthropic import AnthropicModel
+    model = AnthropicModel(
+    client_args={
+        "api_key": os.environ.get('ANTHROPIC_KEY', None),
+    },
+    max_tokens=1028,
+    model_id="claude-sonnet-4-20250514",
+    params={
+        "temperature": 0.7,
+    })
+except: #since 'strands-agents[anthropic]' is optionnal
+    model = None
+
 
 agent_cleanup = Agent(
     tools=[
@@ -297,6 +512,7 @@ agent_cleanup = Agent(
         search_lib_items,
         inspect_lib_directory,
         move_lib_item,
+        save_env_and_remove_deleted_files,
     ],
     system_prompt=f"""
         You participate in LayerLite, a solution to reduce the size of python packages.
@@ -317,9 +533,12 @@ agent_cleanup = Agent(
             - If you think files have to be restored - especially compiled/not python file-, use move_lib_item to remove the __DELETED_prefix. 
             - Once the user script works, tell us, so that we can definitly delete the __DELETED_ files.
     """,
-    # model=model,
+    model=model,
+    
 )
 
 
 if __name__ == "__main__":
-    response = agent_cleanup("Solve issues")
+    # response = agent_cleanup("Solve issues")
+    # save_env_and_remove_deleted_files()
+    execute_user_file()

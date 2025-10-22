@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 import tarfile
 import tempfile
+import zipfile
+import shutil
 import json
 from datetime import datetime
 
@@ -46,9 +48,9 @@ def create_venv_from_requirements(list_of_requirements:list):
     requirements = "\n".join(list_of_requirements)
     with open('user_input/requirements_user_file.txt', 'w') as f:
         f.write(requirements)
-    create_uv_venv('user_input/requirements_user_file.txt', 'env-strands')
-    create_uv_venv('user_input/requirements_user_file.txt', 'env-strands-backup')
-    return measure_venv_size('layerlite_env/env-strands')
+    create_uv_venv('user_input/requirements_user_file.txt', 'sandbox-env')
+    create_uv_venv('user_input/requirements_user_file.txt', 'sandbox-env-backup')
+    return measure_venv_size('layerlite_env/sandbox-env')
 
 @tool
 def execute_user_file():
@@ -58,7 +60,7 @@ def execute_user_file():
     initial_output_result = Path("generated_files/initial_output.json")
 
     result = subprocess.run(
-        ["layerlite_env/env-strands/bin/python", 'user_input/user_file.py'],
+        ["layerlite_env/sandbox-env/bin/python", 'user_input/user_file.py'],
         capture_output=True,
         text=True
     )
@@ -81,7 +83,7 @@ def run_main_pipeline(libs_to_analyze: list):
     The names should be the names of the dir in site-packages, not the name from PIP.
     """
     
-    path_env = 'layerlite_env/env-strands/'
+    path_env = 'layerlite_env/sandbox-env/'
     path_python_exec = path_env + 'bin/python3'
     path_libs = path_env + 'lib/python3.13/site-packages/'
     try:
@@ -112,35 +114,79 @@ def clean_packages_agent() -> str:
 @tool
 def save_env_to_bucket():
     """
-    Save the reduced/cleaned virtual environment to an S3 bucket.
-    Creates a compressed archive of the optimized environment and uploads it with metadata.
+    Save the reduced/cleaned virtual environment as an AWS Lambda deployment package to an S3 bucket.
+    Creates a .zip file with the user file and optimized dependencies at the root level, 
+    formatted for direct Lambda deployment.
     """
     
-    env_path = Path('layerlite_env/env-strands')
+    env_path = Path('layerlite_env/sandbox-env')
+    site_packages_path = env_path / 'lib/python3.13/site-packages'
+    user_file_path = Path('user_input/user_file.py')
     region = os.getenv("AWS_REGION", "us-west-2")
-    bucket_name = os.getenv("LAYERLITE_BUCKET", "layerlite-optimized-envs")
+    bucket_name = os.getenv("LAYERLITE_BUCKET", "layerlite-output")
     
     if not env_path.exists():
-        return {"error": "Virtual environment not found at layerlite_env/env-strands"}
+        return {"error": "Virtual environment not found at layerlite_env/sandbox-env"}
+    
+    if not site_packages_path.exists():
+        return {"error": "Site-packages directory not found in virtual environment"}
+        
+    if not user_file_path.exists():
+        return {"error": "User file not found at user_input/user_file.py"}
     
     try:
         env_metadata = measure_venv_size(str(env_path), detailed=True)
         
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        archive_name = f"layerlite_env_{timestamp}.tar.gz"
-        metadata_name = f"layerlite_env_{timestamp}_metadata.json"
+        archive_name = f"lambda_deployment_package_{timestamp}.zip"
+        metadata_name = f"lambda_deployment_package_{timestamp}_metadata.json"
         
-        with tempfile.NamedTemporaryFile(suffix='.tar.gz', delete=False) as temp_archive:
-            with tarfile.open(temp_archive.name, 'w:gz') as tar:
-                tar.add(env_path, arcname='env-strands')
-            temp_archive_path = temp_archive.name
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_package_dir = Path(temp_dir) / "lambda_package"
+            temp_package_dir.mkdir()
+            
+            shutil.copy2(user_file_path, temp_package_dir / "lambda_function.py")
+            
+            for item in site_packages_path.iterdir():
+                if item.is_dir():
+                    shutil.copytree(item, temp_package_dir / item.name, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(item, temp_package_dir / item.name)
+            
+            for root, dirs, files in os.walk(temp_package_dir):
+                for d in dirs:
+                    os.chmod(os.path.join(root, d), 0o755)
+                for f in files:
+                    os.chmod(os.path.join(root, f), 0o644)
+            
+            with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as temp_archive:
+                temp_archive_path = temp_archive.name
+                
+            with zipfile.ZipFile(temp_archive_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for root, dirs, files in os.walk(temp_package_dir):
+                    for file in files:
+                        file_path = Path(root) / file
+                        arcname = file_path.relative_to(temp_package_dir)
+                        zipf.write(file_path, arcname)
+        
+        zip_size_mb = os.path.getsize(temp_archive_path) / (1024 * 1024)
+        
+        if zip_size_mb > 250:
+            os.unlink(temp_archive_path)
+            return {"error": f"Deployment package too large: {zip_size_mb:.2f}MB (Lambda limit: 250MB)"}
         
         metadata = {
             "timestamp": timestamp,
             "archive_name": archive_name,
+            "package_type": "lambda_deployment_package",
             "environment_stats": env_metadata,
             "layerlite_version": "v3",
-            "compression": "gzip"
+            "compression": "zip",
+            "package_size_mb": round(zip_size_mb, 2),
+            "lambda_compatible": True,
+            "python_version": "3.13",
+            "includes_user_code": True,
+            "handler_file": "lambda_function.py"
         }
         
         s3_client = boto3.client('s3', region_name=region)
@@ -148,8 +194,9 @@ def save_env_to_bucket():
             temp_archive_path,
             bucket_name,
             archive_name,
-            ExtraArgs={'ContentType': 'application/gzip'}
+            ExtraArgs={'ContentType': 'application/zip'}
         )
+        
         with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as temp_metadata:
             json.dump(metadata, temp_metadata, indent=2)
             temp_metadata_path = temp_metadata.name
@@ -160,6 +207,7 @@ def save_env_to_bucket():
             metadata_name,
             ExtraArgs={'ContentType': 'application/json'}
         )
+        
         os.unlink(temp_archive_path)
         os.unlink(temp_metadata_path)
         archive_url = f"s3://{bucket_name}/{archive_name}"
@@ -167,20 +215,24 @@ def save_env_to_bucket():
         
         result = {
             "success": True,
+            "package_type": "lambda_deployment_package",
             "archive_url": archive_url,
             "metadata_url": metadata_url,
             "bucket": bucket_name,
             "region": region,
-            "environment_size_mb": env_metadata.get('total_size_mb', 0),
+            "package_size_mb": round(zip_size_mb, 2),
             "packages_optimized": len(env_metadata.get('packages', {})),
+            "lambda_ready": True,
+            "handler": "lambda_function.lambda_handler",
             "timestamp": timestamp
         }
         
-        logger.info(f"Environment successfully saved to S3: {archive_url}")
+        logger.info(f"Lambda deployment package successfully saved to S3: {archive_url}")
+        logger.info(f"Package size: {zip_size_mb:.2f}MB (under Lambda 250MB limit)")
         return result
         
     except Exception as e:
-        error_msg = f"Failed to save environment to bucket: {str(e)}"
+        error_msg = f"Failed to create Lambda deployment package: {str(e)}"
         logger.error(error_msg)
         return {"error": error_msg}
 
@@ -188,6 +240,22 @@ model = BedrockModel(
     model_id=os.getenv("MODEL_ID", "us.anthropic.claude-sonnet-4-5-20250929-v1:0"),
     region_name=os.getenv("AWS_REGION", "us-west-2")
 )
+
+try:
+    from strands.models.anthropic import AnthropicModel
+    model = AnthropicModel(
+    client_args={
+        "api_key": os.environ.get('ANTHROPIC_KEY', None),
+    },
+    max_tokens=1028,
+    model_id="claude-sonnet-4-20250514",
+    params={
+        "temperature": 0.7,
+    })
+except: #since 'strands-agents[anthropic]' is optionnal
+    model = None
+
+
 
 agent = Agent(
     tools=[
@@ -212,7 +280,7 @@ If it worked correctly, indicate to the user which packages you suggest to optim
 
 Once the user has validated the packages to trim, use `run_main_pipeline` and describe the user the gain that have been made. Ask user if you can continue the cleaning.
 The cleaning has probably broke things. Use `clean_packages_agent` to try to obtain functionnal librairies.
-Finally, once all cleaning is done and the environment is working, use `save_env_to_bucket` to save the optimized environment to an S3 bucket for future use.
+Finally, once all cleaning is done and the environment is working, use `save_env_to_bucket` to save the optimized environment as an AWS Lambda deployment package to an S3 bucket for direct Lambda deployment.
     """,
     model=model,
 )
@@ -233,4 +301,3 @@ def main(payload):
 
 if __name__ == "__main__":
     app.run()
-    # create_uv_venv('user_input/requirements_user_file.txt', 'env-strands')
