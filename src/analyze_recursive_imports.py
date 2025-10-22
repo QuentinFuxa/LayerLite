@@ -24,14 +24,12 @@ class Tree():
     other_parents: list = field(default_factory=list) #to prevent cycles/memory leaks we only store the paths of other parents, not the trees.
     has_been_analyzed: bool = False
 
-    already_analyzed_paths: ClassVar[set] = set()
-    wildcard_imports: ClassVar[set] = set()
     initial_path: ClassVar[str] = ""
     environment: ClassVar[Optional[Environment]] = None
     
     def set_root(self, environment_path: str):
-        self.initial_path = self.path
-        self.environment = Environment(environment_path)
+        Tree.initial_path = self.path
+        Tree.environment = Environment(environment_path)
     
     def __hash__(self):
         return hash((self.name, self.path))
@@ -88,8 +86,9 @@ class Tree():
     
     def guess_probable_path(self):
         path_not_found = []
+        path_found = []
         if self.not_found and self.parent:
-            dirname = os.path.dirname(self.self.parent.path)
+            dirname = os.path.dirname(self.parent.path)
             files = [os.path.join(dirname, f) for f in os.listdir(dirname) if f.startswith(self.name)]
             module_files = [os.path.join(dirname, f) for f in os.listdir(dirname) if self.module and f.startswith(self.module)]
             if files:
@@ -102,8 +101,9 @@ class Tree():
                         self.probable_paths.extend(all_files)
                     else:
                         self.probable_paths.append(file)
+                    path_found.append(self)
             elif module_files:
-                 for file in module_files:
+                for file in module_files:
                     if os.path.isdir(file):
                         all_files = []
                         for root, dirs, files in os.walk(file):
@@ -112,12 +112,18 @@ class Tree():
                         self.probable_paths.extend(all_files)
                     else:
                         self.probable_paths.append(file)
+                path_found.append(self)
             else:
                 path_not_found.append(self)
         elif self.children:
             for child in self.children:
-                path_not_found.extend(child.guess_probable_path())
-        return path_not_found
+                d_paths = child.guess_probable_path()
+                path_not_found.extend(d_paths['path_not_found'])
+                path_found.extend(d_paths['path_found'])
+        return {
+            'path_not_found': path_not_found,
+            'path_found': path_found
+        }
 
     def stub_add_compiled_file(self):
         all_paths = self.probable_paths.copy()
@@ -154,13 +160,13 @@ class Tree():
     
     def should_analyze(self, libs_to_analyze):
         if self.path and not self.has_been_analyzed:
-            if any(lib in self.path for lib in libs_to_analyze) or self.path==self.initial_path and not self.path.endswith('__init__.py'):
+            if any(lib in self.path for lib in libs_to_analyze) or self.path==Tree.initial_path and not self.path.endswith('__init__.py'):
                 return True
         return False
     
     def get_references(self):
         parent_path = self.path
-        script = jedi.Script(path=parent_path, environment=self.environment)
+        script = jedi.Script(path=parent_path, environment=Tree.environment)
         names = script.get_names(all_scopes=False) #all scopes is needed if an import is done inside a function
         n_lines = [name.line for name in names]
         names_references = [name for name in script.get_names(references=True) if name.type == 'module' and name not in names]
@@ -221,7 +227,8 @@ def explore_name_definitions(tree, name, parent_path, line_to_ref, is_wildcard):
                         not_found=True,
                         module=line_to_ref[name.line].name if line_to_ref.get(name.line) else None,
                         line=name.line,
-                        is_wildcard=is_wildcard
+                        is_wildcard=is_wildcard,
+                        parent=tree
                     )                
                 )
     else:
@@ -232,7 +239,8 @@ def explore_name_definitions(tree, name, parent_path, line_to_ref, is_wildcard):
                 not_found=True,
                 module=line_to_ref[name.line].name if line_to_ref.get(name.line) else None,
                 line=name.line,
-                is_wildcard=is_wildcard
+                is_wildcard=is_wildcard,
+                parent=tree
             )                
         )    
     return children
@@ -345,28 +353,33 @@ if __name__ == '__main__':
     output_json_path = "generated_files/lib_structure.json"
 
     libs_to_analyze = ['scipy', 'pvlib']
-    initial_path = "user_input/source_3.py"
-    path_env = 'layerlite_env/env-strands/lib/python3.13/site-packages/'
+    initial_path = "user_input/user_file.py"
+    path_env = 'layerlite_env/env-strands/'
+    path_python_exec = path_env + 'bin/python3'
+    path_libs = path_env + 'lib/python3.13/site-packages/'
+    
+    path_python_exec = path_env + 'bin/python3'
     if RESTORE:
         for lib in libs_to_analyze:
-            re_add_virtualy_removed_files('layerlite_env/env-strands/' + lib)
+            re_add_virtualy_removed_files(path_libs + lib)
     else:
         if ANALYZE:
             tree = Tree(path=initial_path)
-            tree.set_root()
+            tree.set_root(environment_path=path_python_exec)
             resulting_tree = recursive_analysis(tree, libs_to_analyze)
             if SAVE:
+                resulting_tree.environment = None 
                 with open(output_tree_path, 'wb') as handle:
                     pickle.dump(resulting_tree, handle, protocol=pickle.HIGHEST_PROTOCOL)
         else:
             with open(output_tree_path, 'rb') as handle:
                 resulting_tree = pickle.load(handle)
         wildcard_names= resulting_tree.get_wildcard_names()
-        not_found = resulting_tree.guess_probable_path()
+        found_and_not_found = resulting_tree.guess_probable_path()
         resulting_tree.stub_add_compiled_file()
         
         dpaths = extract_used_files(resulting_tree)
     for lib in libs_to_analyze:
         if not RESTORE and DELETE:
-            virtual_remove_unused_files(path_env + lib, dpaths[lib])
-        print(compute_virtual_gained_size(path_env + lib))
+            virtual_remove_unused_files(path_libs + lib, dpaths[lib])
+        print(compute_virtual_gained_size(path_libs + lib))

@@ -1,5 +1,8 @@
 from pathlib import Path
-from src.analyze_recursive_imports import Tree, extract_imports
+try:
+    from analyze_recursive_imports import Tree, extract_imports
+except:
+    from src.analyze_recursive_imports import Tree, extract_imports
 import ast
 
 def split_imports(code):
@@ -111,7 +114,10 @@ def clean_init_files(lib, path_python_exec):
     return analysis_and_correction_output
 
 if __name__ == '__main__':
-    lib_location = 'layerlitev3/layerlite_env/demo_env/lib/python3.13/site-packages/' 
+    path_env = 'layerlite_env/env-strands/'
+    path_python_exec = path_env + 'bin/python3'
+    path_libs = path_env + 'lib/python3.13/site-packages/'
+
     libs_to_analyze = ['scipy', 'pvlib']
     for lib in libs_to_analyze:
-        clean_init_files(lib_location + lib)
+        clean_init_files(path_libs + lib, path_python_exec=path_python_exec)

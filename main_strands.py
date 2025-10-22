@@ -43,9 +43,9 @@ def create_venv_from_requirements(list_of_requirements:list):
     Example: list_of_requirements=['numpy', 'pandas']
     """
     requirements = "\n".join(list_of_requirements)
-    with open('requirements_user_file.txt', 'w') as f:
+    with open('user_input/requirements_user_file.txt', 'w') as f:
         f.write(requirements)
-    create_uv_venv('requirements_user_file.txt', 'env-strands')
+    create_uv_venv('user_input/requirements_user_file.txt', 'env-strands')
     return measure_venv_size('layerlite_env/env-strands')
 
 @tool
@@ -217,3 +217,5 @@ def main(payload):
 
 if __name__ == "__main__":
     app.run()
+    # create_venv_from_requirements(['pvlib'])
+    

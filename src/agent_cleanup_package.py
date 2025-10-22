@@ -12,7 +12,6 @@ from typing import Optional
 import jedi
 from strands import Agent, tool
 from strands.models import BedrockModel
-from strands.agent.conversation_manager.conversation_manager import ConversationManager
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -20,7 +19,7 @@ logger = logging.getLogger(__name__)
 INITIAL_OUTPUT_RESULT = Path("generated_files/initial_output.json")
 MODIFICATIONS_LOG_PATH = Path("generated_files/llm_modifications_log.json")
 USER_FILE = "user_input/user_file.py"
-LIB_ROOT_PATH = Path("layerlite_env/demo_env/lib/python3.13/site-packages")
+LIB_ROOT_PATH = Path("layerlite_env/env-strands/lib/python3.13/site-packages")
 
 def initialize_modification_log():
     if not MODIFICATIONS_LOG_PATH.exists():
@@ -58,13 +57,18 @@ def to_lib_relative_path(path: Path) -> str:
     try:
         return str(path.relative_to(LIB_ROOT_PATH))
     except ValueError:
-        return str(path)
+        try:
+            resolved_lib_root = LIB_ROOT_PATH.resolve()
+            resolved_path = path.resolve()
+            return str(resolved_path.relative_to(resolved_lib_root))
+        except ValueError:
+            return str(path)
 
 @tool
 def read_file(relative_path: str) -> str:
     """Read file relative to the library root"""
     path = LIB_ROOT_PATH / relative_path
-    log_tool(operation='Read File', file_path=path)
+    log_tool(operation='Read File', file_path=to_lib_relative_path(path))
     file_path = Path(path)
     if not file_path.exists():
         raise FileNotFoundError(f"File not found: {path}")
@@ -73,13 +77,14 @@ def read_file(relative_path: str) -> str:
 
 @tool
 def replace_text(relative_path: str, start_line: int, end_line: int, replacement: str) -> str:
+    """Replace file content relative to the library root"""
     path = LIB_ROOT_PATH / relative_path
     file_path = Path(path)
     
     if not file_path.exists():
         return f"Error: File not found: {path}"
     
-    original_text = read_file(path)
+    original_text = read_file(relative_path)
     original_lines = original_text.splitlines()
     
     if start_line < 1 or end_line < start_line or start_line > len(original_lines):
@@ -93,7 +98,7 @@ def replace_text(relative_path: str, start_line: int, end_line: int, replacement
     
     log_tool(
         operation= 'Replacement',
-        file_path=file_path,
+        file_path=to_lib_relative_path(file_path),
         details={
             'start_line': start_line,
             'end_line': end_line,
@@ -105,7 +110,7 @@ def replace_text(relative_path: str, start_line: int, end_line: int, replacement
 def check_syntax_file(relative_path: str):
     """Check if syntax of given file is correct. Path is relative to library root"""
     path = LIB_ROOT_PATH / relative_path
-    log_tool(operation= 'Check syntax', file_path=path,)
+    log_tool(operation= 'Check syntax', file_path=to_lib_relative_path(path),)
     script = jedi.Script(path=path)
     errors = script.get_syntax_errors()
     return errors
@@ -239,12 +244,12 @@ def move_lib_item(source_relative_path: str, destination_relative_path: str) -> 
         error_message = f"Destination '{destination_relative_path}' already exists"
         
     if error_message:
-        log_tool(operation="Move item Error", file_path=source_path, details={'destination': str(destination_path), 'error': error_message})
+        log_tool(operation="Move item Error", file_path=to_lib_relative_path(source_path), details={'destination': to_lib_relative_path(destination_path), 'error': error_message})
         return f"Error: {error_message}"
     destination_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(source_path), str(destination_path))
 
-    log_tool("Move item", file_path=source_path, details={'destination': str(destination_path)})
+    log_tool("Move item", file_path=to_lib_relative_path(source_path), details={'destination': to_lib_relative_path(destination_path)})
     return f"Moved '{source_relative_path}' to '{destination_relative_path}'"
 
 @tool
@@ -253,7 +258,7 @@ def execute_user_file():
     Use that to test if user file still works
     """
     result = subprocess.run(
-        ["layerlite_env/demo_env/bin/python", USER_FILE],
+        ["layerlite_env/env-strands/bin/python", USER_FILE],
         capture_output=True,
         text=True
     )
@@ -265,19 +270,27 @@ def execute_user_file():
     }
 
 @tool
+def read_user_file() -> str:
+    """Read the user's input file content"""
+    log_tool(operation='Read User File', file_path=Path(USER_FILE))
+    user_file_path = Path(USER_FILE)
+    return user_file_path.read_text()
+
+@tool
 def execute_initial_user_file():
     with open(INITIAL_OUTPUT_RESULT) as f:
         content = f.read()
     return content
 
-model = BedrockModel(
-    model_id=os.getenv("MODEL_ID", "us.anthropic.claude-sonnet-4-5-20250929-v1:0"),
-    region_name=os.getenv("AWS_REGION", "us-west-2")
-)
+# model = BedrockModel(
+#     model_id=os.getenv("MODEL_ID", "us.anthropic.claude-sonnet-4-5-20250929-v1:0"),
+#     region_name=os.getenv("AWS_REGION", "us-west-2")
+# )
 
 agent_cleanup = Agent(
     tools=[
         execute_initial_user_file,
+        read_user_file,
         read_file,
         replace_text,
         execute_user_file,
@@ -304,8 +317,7 @@ agent_cleanup = Agent(
             - If you think files have to be restored - especially compiled/not python file-, use move_lib_item to remove the __DELETED_prefix. 
             - Once the user script works, tell us, so that we can definitly delete the __DELETED_ files.
     """,
-    model=model,
-    conversation_manager=ConversationManager
+    # model=model,
 )
 
 
